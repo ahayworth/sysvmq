@@ -295,27 +295,15 @@ sysvmq_send(int argc, VALUE *argv, VALUE self)
   // TODO: Can a string copy be avoided?
   memcpy(sysv->msgbuf->mtext, RSTRING_PTR(message), blocking.size);
 
-  // Non-blocking call, skip the expensive GVL release/acquire
-  if ((blocking.flags & IPC_NOWAIT) == IPC_NOWAIT) {
-    while(sysvmq_maybe_blocking_send(&blocking) == NULL && blocking.error < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-
-      rb_sys_fail("Failed sending message to queue");
+  while (WITHOUT_GVL(sysvmq_maybe_blocking_send, &blocking, RUBY_UBF_IO, NULL) == NULL
+          && blocking.error < 0) {
+    if (errno == EINTR || blocking.error == UNINITIALIZED_ERROR) {
+      continue;
+    } else if (errno == EAGAIN && (blocking.flags & IPC_NOWAIT) == IPC_NOWAIT) {
+      break;
     }
-  } else {
-    // msgsnd(2) can block waiting for a message, if IPC_NOWAIT is not passed.
-    // We unlock the GVL waiting for the call so other threads (e.g. signal
-    // handling) can continue to work.
-    while (WITHOUT_GVL(sysvmq_maybe_blocking_send, &blocking, RUBY_UBF_IO, NULL) == NULL
-            && blocking.error < 0) {
-      if (errno == EINTR || blocking.error == UNINITIALIZED_ERROR) {
-        continue;
-      }
 
-      rb_sys_fail("Failed sending message to queue");
-    }
+    rb_sys_fail("Failed sending message to queue");
   }
 
   return message;
